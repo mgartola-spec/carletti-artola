@@ -1,0 +1,8 @@
+# Datos de afiliados: no se versionan.
+# El Excel de salida contiene registros a nivel individual (edad, practicas,
+# cobertura especial por Afiliado ID) y se entrega por fuera del repositorio.
+*.xlsx
+*.xls
+*.pbix
+__pycache__/
+*.pyc
