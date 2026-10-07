@@ -154,3 +154,58 @@ resignado, y la más fácil de comunicar.
 columna `Ciudad Afiliado` de la Base quedó en `PENDIENTE PADRON`. Para completarla hace falta el
 padrón de afiliados (`OSAP_Benef`: `ben_id`, `loc_nombre`, `par_nombre`) y se cruza por
 `Afiliado ID`. El análisis cubre todas las ciudades; falta solo el dato para filtrar.
+
+---
+
+## Simulador de coseguro propuesto
+
+El Excel incorpora un simulador con fórmulas encadenadas. Dos palancas:
+
+**1. Por práctica** — hoja `Practicas`, columna **`% PROPUESTO`** (la amarilla, la única que se
+escribe a mano). Al lado:
+
+| Columna | Qué hace |
+|---|---|
+| `% PROPUESTO` | Editable. Se escribe `30` para 30%. Arranca en el % nominal de la regla vigente. |
+| `Coseguro Propuesto` | `Valor Prestación × % Propuesto` (recortado por el tope global) |
+| `Diferencia $` | `Coseguro Propuesto − Coseguro Actual`. En rojo y negativo = OSAP resigna. |
+| `Diferencia %` | La misma diferencia en porcentaje |
+
+**2. Global** — hoja `Simulador`, celda **B5**: tope máximo. Con `30`, ninguna práctica puede
+cobrar más del 30% del valor de la prestación, sin tocar los porcentajes uno por uno.
+
+El cambio se propaga solo a las 2.940 líneas de la Base (columnas `% Propuesto`,
+`Coseguro Propuesto`, `Diferencia $`), a la hoja `Reglas Coseguro` y al tablero del `Simulador`,
+que muestra el impacto total y desagregado por modalidad y por categoría de afiliado.
+
+### Escenario que viene cargado
+
+Cada práctica arranca al **% nominal de su regla**, así que la diferencia inicial responde a:
+*¿qué pasaría si se cobrara de verdad el porcentaje nominal en vez de la tabla fija vigente?*
+
+**Resultado: −$2.376.994 (−6,2%).** Pero el neto esconde movimientos en los dos sentidos:
+
+| Modalidad | Actual | Al nominal | Diferencia |
+|---|---|---|---|
+| Oftalmo c/aparatología | $10.355.800 | $5.965.867 | **−$4.389.933** |
+| Mamografía | $2.359.400 | $1.508.136 | **−$851.264** |
+| Radiografía | $2.994.500 | $2.595.139 | −$399.361 |
+| Tomografía computada | $5.157.800 | $4.958.694 | −$199.106 |
+| Resonancia | $5.819.300 | $5.732.657 | −$86.643 |
+| Endoscopía / video | $3.187.900 | $4.003.255 | **+$815.355** |
+| Eco / Doppler | $7.396.200 | $10.186.469 | **+$2.790.269** |
+
+Eco/doppler y endoscopía hoy cobran **menos** que su nominal del 30%; oftalmología y mamografía
+cobran mucho **más**. Ordenar las reglas al nominal corrige la inequidad entre modalidades casi sin
+costo neto para OSAP, porque lo que se resigna en oftalmología se compensa con eco/doppler.
+
+### Escenarios probados
+
+| Escenario | Coseguro propuesto | Diferencia |
+|---|---|---|
+| Tope global 20% | $27.371.641 | **−$11.114.159 (−28,9%)** |
+| % nominal por regla (cargado) | $36.108.806 | −$2.376.994 (−6,2%) |
+| Nominal + retinografía sin coseguro | $35.517.659 | −$2.968.141 (−7,7%) |
+
+Para dejar una práctica **sin coseguro**, se pone `0` en su `% PROPUESTO`. Para volver al punto de
+partida neutro (diferencia cero), se copia la columna `% Real` sobre `% PROPUESTO`.

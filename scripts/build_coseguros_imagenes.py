@@ -166,6 +166,12 @@ BOX    = Border(*[Side('thin', color='B7C9DD')] * 4)
 CTR    = Alignment(horizontal='center', vertical='center')
 WRAP   = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
+FINPUT = PatternFill('solid', fgColor='FFF2CC')          # celda que el usuario edita
+BINPUT = Border(*[Side('medium', color='BF8F00')] * 4)
+INPUTF = Font(name=F, size=11, bold=True, color='7F6000')
+
+DIFF  = '"$"#,##0;[Red]-"$"#,##0'
+DIFFP = '+0.0"%";[Red]-0.0"%"'
 MONEY = '"$"#,##0'
 PCT   = '0.0"%"'
 NUM   = '#,##0'
@@ -204,6 +210,28 @@ def kpi(ws, fila, col, etiqueta, valor, fmt=MONEY):
 
 # ------------------------------------------------------------------ hojas
 BASE = "'Base Imagenes'"
+TOPE = 'Simulador!$B$5'          # tope global de % editable por el usuario
+FILA_PRACT_INI = 5               # primera fila de datos de la hoja Practicas
+
+
+def tabla_practicas(im):
+    """Una fila por combinacion codigo+practica+regla. Es la unidad sobre la que
+    el usuario propone un porcentaje nuevo. Devuelve tambien el % nominal vigente,
+    que se usa como valor inicial de la columna editable."""
+    g = (im.groupby(['it_cod', 'nom_nom', '__modalidad', 'Agrupacion'])
+            .agg(afil=('ben_id', 'nunique'), vu=('Valor', 'median'),
+                 coseg=('Valor_Total', 'sum'), pract=('ValorPractica', 'sum'),
+                 nominal=('% Aplicacion', lambda s: s.mode().iat[0] if len(s.mode()) else None))
+            .reset_index().sort_values('coseg', ascending=False))
+    # Donde la regla es por importe fijo ("Valor"), el nominal no es un %:
+    # se arranca con el % real que se esta cobrando hoy, redondeado.
+    def inicial(r):
+        try:
+            return float(r['nominal'])
+        except (TypeError, ValueError):
+            return round(100 * r['coseg'] / r['pract'], 1) if r['pract'] else 0.0
+    g['inicial'] = g.apply(inicial, axis=1)
+    return g
 
 
 def filtro_img(ult):
@@ -211,7 +239,7 @@ def filtro_img(ult):
     return f',{BASE}!$AA$2:$AA${ult},"{IMAGEN}"'
 
 
-def hoja_base(wb, img):
+def hoja_base(wb, img, ult_pract):
     ws = wb.create_sheet('Base Imagenes')
     encabezados = [h for h, _ in COLS]
     anchos = [11, 12, 11, 13, 7, 16, 20, 9, 7, 24, 20, 10, 52, 17, 11, 7, 20,
@@ -241,8 +269,27 @@ def hoja_base(wb, img):
             c.font = TXT
         r += 1
     ultima = r - 1
+
+    # --- simulacion por linea: el % propuesto se busca en la hoja Practicas ---
+    nc = len(COLS)
+    KP = f'Practicas!$K${FILA_PRACT_INI}:$K${ult_pract}'
+    CL = f'Practicas!$O${FILA_PRACT_INI}:$O${ult_pract}'
+    for j, h in enumerate(['% Propuesto', 'Coseguro Propuesto', 'Diferencia $'], start=nc + 1):
+        c = ws.cell(1, j, h)
+        c.font, c.fill, c.alignment, c.border = H2, FNAVY, WRAP, BOX
+        ws.column_dimensions[get_column_letter(j)].width = 16
+    for rr in range(2, ultima + 1):
+        a = ws.cell(rr, nc + 1,
+                    f'=IFERROR(MIN(INDEX({KP},MATCH($L{rr}&"|"&$M{rr}&"|"&$N{rr},{CL},0)),'
+                    f'{TOPE}),IFERROR($T{rr}/$U{rr}*100,""))')
+        a.number_format, a.font = PCT, TXT
+        b = ws.cell(rr, nc + 2, f'=IFERROR($U{rr}*${get_column_letter(nc + 1)}{rr}/100,"")')
+        b.number_format, b.font = MONEY, TXT
+        d = ws.cell(rr, nc + 3, f'=IFERROR(${get_column_letter(nc + 2)}{rr}-$T{rr},"")')
+        d.number_format, d.font = DIFF, TXT
+
     ws.add_table(Table(displayName='TablaBaseImagenes',
-                       ref=f'A1:{get_column_letter(len(COLS))}{ultima}',
+                       ref=f'A1:{get_column_letter(nc + 3)}{ultima}',
                        tableStyleInfo=TableStyleInfo(name='TableStyleLight9',
                                                      showRowStripes=True)))
     ws.conditional_formatting.add(f'V2:V{ultima}',
@@ -370,14 +417,16 @@ def hoja_resumen(wb, img, ult, total_filas, total_coseg):
 def hoja_reglas(wb, img, ult):
     ws = wb.create_sheet('Reglas Coseguro')
     titulo(ws, 'REGLAS DE COSEGURO VIGENTES — nominal vs. real (solo practicas con aparatologia)', 10)
-    ws['A2'] = ('Cada fila es una regla tal como esta configurada hoy. La columna Desvio muestra cuanto '
-                'se aparta el cobro real del porcentaje nominal: ahi se decide que modificar.')
+    ws['A2'] = ('Cada fila es una regla tal como esta configurada hoy. Desvio muestra cuanto se aparta '
+                'el cobro real del nominal. Las tres ultimas columnas reflejan lo que propusiste en la '
+                'hoja Practicas: aca no se escribe nada.')
     ws['A2'].font = NOTA
-    ws.merge_cells('A2:J2')
+    ws.merge_cells('A2:M2')
 
-    enc = ['Regla (Agrupacion)', '% Aplicacion', 'Modo', 'Lineas', 'Afiliados', 'Coseguro',
-           'Valor Prestacion', '% Real', '% Nominal', 'Desvio (pp)']
-    cabecera(ws, 4, enc, [22, 13, 8, 10, 11, 16, 18, 10, 11, 12])
+    enc = ['Regla (Agrupacion)', '% Aplicacion', 'Modo', 'Estudios', 'Afiliados',
+           'Coseguro Actual', 'Valor Prestacion', '% Real', '% Nominal', 'Desvio (pp)',
+           'Coseguro Propuesto', 'Diferencia $', '% Propuesto efectivo']
+    cabecera(ws, 4, enc, [22, 12, 7, 9, 10, 16, 17, 9, 10, 11, 17, 15, 14])
 
     g = (img.groupby(['Agrupacion', '% Aplicacion', 'ModoCoseguro'], dropna=False)
             .agg(afil=('ben_id', 'nunique'), coseg=('Valor_Total', 'sum'))
@@ -397,7 +446,10 @@ def hoja_reglas(wb, img, ult):
         ws.cell(r, 8, f'=IFERROR($F{r}/$G{r}*100,"")').number_format = PCT
         ws.cell(r, 9, f'=IF(ISNUMBER($B{r}),$B{r},"")').number_format = PCT
         ws.cell(r, 10, f'=IFERROR(IF(ISNUMBER($B{r}),$H{r}-$B{r},""),"")').number_format = '+0.0;-0.0'
-        for j in range(1, 11):
+        ws.cell(r, 11, f'=SUMIFS({BASE}!$AC$2:$AC${ult},{crit})').number_format = MONEY
+        ws.cell(r, 12, f'=IFERROR($K{r}-$F{r},"")').number_format = DIFF
+        ws.cell(r, 13, f'=IFERROR($K{r}/$G{r}*100,"")').number_format = PCT
+        for j in range(1, 14):
             ws.cell(r, j).border = BOX
             if j != 1:
                 ws.cell(r, j).font = TXT
@@ -446,22 +498,27 @@ def hoja_reglas(wb, img, ult):
     ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=9)
 
 
-def hoja_practicas(wb, img, ult):
+def hoja_practicas(wb, im, ult):
+    """Hoja central de la simulacion: una fila por codigo+practica+regla, con la
+    columna % PROPUESTO editable y la diferencia en pesos que produce."""
     ws = wb.create_sheet('Practicas')
-    titulo(ws, 'PRACTICAS CON APARATOLOGIA — donde esta la distorsion', 10)
-    ws['A2'] = ('Ordenado por coseguro. Las filas en rojo son las practicas donde el afiliado paga '
-                '80% o mas del valor de la prestacion: ahi el coseguro dejo de ser copago.')
+    titulo(ws, 'PRACTICAS DE IMAGEN — simulador de coseguro propuesto', 14)
+    ws['A2'] = ('Escribi el porcentaje nuevo en la columna amarilla % PROPUESTO y mira la Diferencia $. '
+                'Todo lo demas se recalcula solo, incluida la Base y las hojas Reglas, Resumen y Simulador.')
     ws['A2'].font = NOTA
-    ws.merge_cells('A2:J2')
-    enc = ['Codigo', 'Practica', 'Modalidad', 'Regla', 'Lineas', 'Afiliados',
-           'Coseguro Unit.', 'Coseguro', 'Valor Prestacion', '% Real']
-    cabecera(ws, 4, enc, [10, 56, 22, 18, 9, 10, 14, 15, 17, 10])
-    g = (img.groupby(['it_cod', 'nom_nom', '__modalidad', 'Agrupacion'])
-            .agg(afil=('ben_id', 'nunique'), vu=('Valor', 'median'), coseg=('Valor_Total', 'sum'))
-            .reset_index().sort_values('coseg', ascending=False))
-    r = 5
+    ws.merge_cells('A2:N2')
+    enc = ['Codigo', 'Practica', 'Modalidad', 'Regla', 'Estudios', 'Afiliados',
+           'Coseguro Unit.', 'Coseguro Actual', 'Valor Prestacion', '% Real',
+           '% PROPUESTO', 'Coseguro Propuesto', 'Diferencia $', 'Diferencia %', '_clave']
+    cabecera(ws, 4, enc, [10, 50, 19, 16, 9, 9, 13, 15, 16, 9, 13, 16, 14, 12, 4])
+    ws.cell(4, 11).fill = PatternFill('solid', fgColor='BF8F00')
+    ws.column_dimensions['O'].hidden = True
+
+    g = tabla_practicas(im)
+    r = FILA_PRACT_INI
     for _, row in g.iterrows():
-        crit = f'{BASE}!$L$2:$L${ult},$A{r},{BASE}!$M$2:$M${ult},$B{r}' + filtro_img(ult)
+        crit = (f'{BASE}!$L$2:$L${ult},$A{r},{BASE}!$M$2:$M${ult},$B{r},'
+                f'{BASE}!$N$2:$N${ult},$D{r}') + filtro_img(ult)
         ws.cell(r, 1, row['it_cod']).alignment = CTR
         ws.cell(r, 2, row['nom_nom'])
         ws.cell(r, 3, row['__modalidad'])
@@ -475,15 +532,54 @@ def hoja_practicas(wb, img, ult):
         for j in range(1, 11):
             ws.cell(r, j).border = BOX
             ws.cell(r, j).font = TXT
+        # --- simulacion ---
+        ce = ws.cell(r, 11, float(row['inicial']))                       # EDITABLE
+        ce.number_format, ce.font = PCT, INPUTF
+        ce.fill, ce.border, ce.alignment = FINPUT, BINPUT, CTR
+        ws.cell(r, 12, f'=IFERROR($I{r}*MIN($K{r},{TOPE})/100,"")').number_format = MONEY
+        ws.cell(r, 13, f'=IFERROR($L{r}-$H{r},"")').number_format = DIFF
+        ws.cell(r, 14, f'=IFERROR($M{r}/$H{r}*100,"")').number_format = DIFFP
+        ws.cell(r, 15, f'=$A{r}&"|"&$B{r}&"|"&$D{r}')
+        for j in range(12, 15):
+            ws.cell(r, j).border = BOX
+            ws.cell(r, j).font = TXT
         r += 1
-    ws.cell(r - 1 + 2, 1, f'{len(g)} combinaciones de codigo y practica.').font = NOTA
-    ws.conditional_formatting.add(f'J5:J{r - 1}',
+
+    ultima = r - 1
+    rt = r
+    ws.cell(rt, 1, 'TOTAL')
+    for j in range(1, 15):
+        c = ws.cell(rt, j)
+        c.font = Font(name=F, size=10, bold=True, color='FFFFFF')
+        c.fill, c.border = FNAVY, BOX
+    ws.cell(rt, 5, f'=SUM(E{FILA_PRACT_INI}:E{ultima})').number_format = NUM
+    ws.cell(rt, 8, f'=SUM(H{FILA_PRACT_INI}:H{ultima})').number_format = MONEY
+    ws.cell(rt, 9, f'=SUM(I{FILA_PRACT_INI}:I{ultima})').number_format = MONEY
+    ws.cell(rt, 10, f'=IFERROR($H{rt}/$I{rt}*100,"")').number_format = PCT
+    ws.cell(rt, 12, f'=SUM(L{FILA_PRACT_INI}:L{ultima})').number_format = MONEY
+    ws.cell(rt, 13, f'=SUM(M{FILA_PRACT_INI}:M{ultima})').number_format = DIFF
+    ws.cell(rt, 14, f'=IFERROR($M{rt}/$H{rt}*100,"")').number_format = DIFFP
+
+    ws.conditional_formatting.add(f'J{FILA_PRACT_INI}:J{ultima}',
         CellIsRule(operator='greaterThanOrEqual', formula=['80'],
+                   fill=PatternFill('solid', fgColor='F2C9C8'),
                    font=Font(name=F, size=10, bold=True, color=ALERTA)))
-    ws.conditional_formatting.add(f'J5:J{r - 1}',
+    ws.conditional_formatting.add(f'J{FILA_PRACT_INI}:J{ultima}',
         CellIsRule(operator='between', formula=['50', '79.999'],
                    fill=PatternFill('solid', fgColor='FCEBC8')))
-    ws.auto_filter.ref = f'A4:J{r - 1}'
+    ws.auto_filter.ref = f'A4:N{ultima}'
+
+    for k, t in enumerate([
+        f'{len(g)} combinaciones de codigo + practica + regla. Ordenadas por coseguro actual.',
+        'La columna % PROPUESTO (amarilla) es la unica que se escribe a mano: poner 30 significa 30%.',
+        'Arranca en el porcentaje nominal de la regla vigente. Por eso la Diferencia $ ya muestra, de',
+        'entrada, cuanto cambiaria el coseguro si de verdad se cobrara el nominal en vez de la tabla fija.',
+        'Diferencia $ en rojo y negativo = OSAP resigna esa plata y el afiliado la deja de pagar.',
+        'El tope global de la hoja Simulador recorta cualquier % propuesto que lo supere.',
+    ]):
+        ws.cell(rt + 2 + k, 1, t).font = NOTA
+        ws.merge_cells(start_row=rt + 2 + k, start_column=1, end_row=rt + 2 + k, end_column=14)
+    return ultima
 
 
 def hoja_prestadores(wb, img, ult, top=25):
@@ -634,24 +730,155 @@ def hoja_criterios(wb, total_filas, total_coseg, img):
     ])
 
 
+def hoja_simulador(wb, im, ult, ult_pract):
+    """Tablero de la propuesta: tope global editable y el impacto total en pesos."""
+    ws = wb.create_sheet('Simulador')
+    titulo(ws, 'SIMULADOR DE COSEGUROS DE IMAGEN — impacto en pesos', 8)
+    ws['A2'] = ('Dos palancas: el % por practica en la hoja Practicas (columna amarilla) y el tope '
+                'global de aca abajo. Todo lo demas son formulas.')
+    ws['A2'].font = NOTA
+    ws.merge_cells('A2:H2')
+
+    for j, a in enumerate([30, 18, 18, 18, 14, 18, 16, 14], start=1):
+        ws.column_dimensions[get_column_letter(j)].width = a
+
+    ws['A4'] = 'TOPE GLOBAL: ningun coseguro puede superar este % del valor de la prestacion'
+    ws['A4'].font = Font(name=F, size=10, bold=True, color=NAVY)
+    ws.merge_cells('A4:G4')
+    ws['A5'] = 'Tope maximo (%)'
+    ws['A5'].font = BOLD
+    c = ws['B5']                                   # <-- celda que referencia todo el libro
+    c.value = 100
+    c.number_format, c.font, c.fill, c.border, c.alignment = PCT, INPUTF, FINPUT, BINPUT, CTR
+    ws['C5'] = ('Poner 100 = sin tope. Poner 30 = ninguna practica puede cobrar mas del 30% '
+                'del valor de la prestacion.')
+    ws['C5'].font = NOTA
+    ws.merge_cells('C5:H5')
+
+    PR = f'Practicas!$H${FILA_PRACT_INI}:$H${ult_pract}'
+    PP = f'Practicas!$L${FILA_PRACT_INI}:$L${ult_pract}'
+    kpi(ws, 7, 1, 'COSEGURO ACTUAL',    f'=SUM({PR})')
+    kpi(ws, 7, 3, 'COSEGURO PROPUESTO', f'=SUM({PP})')
+    kpi(ws, 7, 5, 'DIFERENCIA', '=C8-A8')
+    ws.cell(8, 5).number_format = DIFF
+    kpi(ws, 7, 7, 'VARIACION', '=IFERROR((C8-A8)/A8*100,"")', DIFFP)
+
+    ws['A10'] = ('ESCENARIO CARGADO: cada practica al % nominal de su regla. La diferencia de arriba es, '
+                 'entonces, lo que cambiaria el coseguro si se cobrara el nominal en vez de la tabla fija '
+                 'vigente. Hay modalidades que suben (hoy cobran menos del nominal) y otras que bajan.')
+    ws['A10'].font = Font(name=F, size=9, italic=True, color='7F6000')
+    ws.merge_cells('A10:H10')
+
+    fila = 12
+    ws.cell(fila, 1, 'IMPACTO POR MODALIDAD').font = Font(name=F, size=12, bold=True, color=NAVY)
+    fila += 1
+    enc = ['Modalidad', 'Coseguro Actual', 'Coseguro Propuesto', 'Diferencia $', 'Variacion %',
+           'Valor Prestacion', '% Real actual', '% Real propuesto']
+    for j, h in enumerate(enc, start=1):
+        c = ws.cell(fila, j, h); c.font, c.fill, c.alignment, c.border = H2, FNAVY, WRAP, BOX
+    ws.row_dimensions[fila].height = 32
+
+    mods = [m for m in ORDEN_INFORME if m in PRODUCEN_IMAGEN and m in set(im['__modalidad'])]
+    r0 = fila + 1
+    for i, m in enumerate(mods):
+        r = r0 + i
+        cr = f'{BASE}!$K$2:$K${ult},$A{r}'
+        ws.cell(r, 1, m).font = BOLD
+        ws.cell(r, 2, f'=SUMIFS({BASE}!$T$2:$T${ult},{cr})').number_format = MONEY
+        ws.cell(r, 3, f'=SUMIFS({BASE}!$AC$2:$AC${ult},{cr})').number_format = MONEY
+        ws.cell(r, 4, f'=IFERROR($C{r}-$B{r},"")').number_format = DIFF
+        ws.cell(r, 5, f'=IFERROR(($C{r}-$B{r})/$B{r}*100,"")').number_format = DIFFP
+        ws.cell(r, 6, f'=SUMIFS({BASE}!$U$2:$U${ult},{cr})').number_format = MONEY
+        ws.cell(r, 7, f'=IFERROR($B{r}/$F{r}*100,"")').number_format = PCT
+        ws.cell(r, 8, f'=IFERROR($C{r}/$F{r}*100,"")').number_format = PCT
+        for j in range(1, 9):
+            ws.cell(r, j).border = BOX
+            if j > 1:
+                ws.cell(r, j).font = TXT
+    rt = r0 + len(mods)
+    ws.cell(rt, 1, 'TOTAL IMAGEN')
+    for j in range(1, 9):
+        c = ws.cell(rt, j)
+        c.font = Font(name=F, size=10, bold=True, color='FFFFFF')
+        c.fill, c.border = FNAVY, BOX
+    for j, col in [(2, 'B'), (3, 'C'), (6, 'F')]:
+        ws.cell(rt, j, f'=SUM({col}{r0}:{col}{rt - 1})').number_format = MONEY
+    ws.cell(rt, 4, f'=IFERROR($C{rt}-$B{rt},"")').number_format = DIFF
+    ws.cell(rt, 5, f'=IFERROR(($C{rt}-$B{rt})/$B{rt}*100,"")').number_format = DIFFP
+    ws.cell(rt, 7, f'=IFERROR($B{rt}/$F{rt}*100,"")').number_format = PCT
+    ws.cell(rt, 8, f'=IFERROR($C{rt}/$F{rt}*100,"")').number_format = PCT
+
+    ws.conditional_formatting.add(f'D{r0}:D{rt}',
+        CellIsRule(operator='lessThan', formula=['0'],
+                   font=Font(name=F, size=10, bold=True, color=ALERTA)))
+
+    r = rt + 2
+    ws.cell(r, 1, 'IMPACTO POR CATEGORIA DE AFILIADO').font = Font(name=F, size=12, bold=True, color=NAVY)
+    r += 1
+    enc2 = ['Tipo Coseguro', 'Quienes son', 'Coseguro Actual', 'Coseguro Propuesto',
+            'Diferencia $', 'Variacion %', 'Afiliados', 'Dif. prom. x afiliado']
+    for j, h in enumerate(enc2, start=1):
+        c = ws.cell(r, j, h); c.font, c.fill, c.alignment, c.border = H2, FNAVY, WRAP, BOX
+    ws.row_dimensions[r].height = 32
+    QUIEN = {'A': 'Activos, aportantes, corporativo, PMO', 'H': 'Jubilados y adherentes',
+             'E': 'Exentos / casos especiales', 'AC': 'Activos c/cobertura especial',
+             'HC': 'Jubilados c/cobertura especial', 'S': 'Otros'}
+    gt = (im.groupby('TipoCoseguro').agg(afil=('ben_id', 'nunique'), coseg=('Valor_Total', 'sum'))
+            .reset_index().sort_values('coseg', ascending=False))
+    r1 = r + 1
+    for i, (_, row) in enumerate(gt.iterrows()):
+        rr = r1 + i
+        cr = f'{BASE}!$H$2:$H${ult},$A{rr}' + filtro_img(ult)
+        ws.cell(rr, 1, row['TipoCoseguro']).font = BOLD
+        ws.cell(rr, 1).alignment = CTR
+        ws.cell(rr, 2, QUIEN.get(row['TipoCoseguro'], '—')).font = TXT
+        ws.cell(rr, 3, f'=SUMIFS({BASE}!$T$2:$T${ult},{cr})').number_format = MONEY
+        ws.cell(rr, 4, f'=SUMIFS({BASE}!$AC$2:$AC${ult},{cr})').number_format = MONEY
+        ws.cell(rr, 5, f'=IFERROR($D{rr}-$C{rr},"")').number_format = DIFF
+        ws.cell(rr, 6, f'=IFERROR(($D{rr}-$C{rr})/$C{rr}*100,"")').number_format = DIFFP
+        ws.cell(rr, 7, row['afil']).number_format = NUM
+        ws.cell(rr, 8, f'=IFERROR($E{rr}/$G{rr},"")').number_format = DIFF
+        for j in range(1, 9):
+            ws.cell(rr, j).border = BOX
+            if j > 2:
+                ws.cell(rr, j).font = TXT
+    r = r1 + len(gt) + 1
+    for k, t in enumerate([
+        'COMO USARLO',
+        '1. Para cambiar una practica puntual: hoja Practicas, columna amarilla % PROPUESTO.',
+        '2. Para una regla transversal: poner el tope global en B5 (por ejemplo 30) y dejar los % como estan.',
+        '3. Para dejar una practica sin coseguro: poner 0 en su % PROPUESTO.',
+        'Diferencia $ en rojo y negativo es plata que OSAP resigna y el afiliado deja de pagar.',
+        'La columna Dif. prom. x afiliado sirve para medir el alivio real por persona.',
+    ]):
+        c = ws.cell(r + k, 1, t)
+        c.font = Font(name=F, size=11, bold=True, color=NAVY) if k == 0 else NOTA
+        ws.merge_cells(start_row=r + k, start_column=1, end_row=r + k, end_column=8)
+
+
+
 # ------------------------------------------------------------------- main
 def main():
     entrada, salida = sys.argv[1], sys.argv[2]
     df, img, total_filas, total_coseg = preparar(entrada)
     im = img[img['__tipoest'] == IMAGEN].copy()
 
+    # la hoja Practicas define las filas a las que apunta la Base: se calcula primero
+    ult_pract = FILA_PRACT_INI + len(tabla_practicas(im)) - 1
+
     wb = Workbook()
     wb.remove(wb.active)
-    ult = hoja_base(wb, img)                     # base completa, trazados marcados aparte
+    ult = hoja_base(wb, img, ult_pract)          # base completa, trazados marcados aparte
     hoja_resumen(wb, img, ult, total_filas, total_coseg)
     hoja_reglas(wb, im, ult)                     # alcance = imagen
-    hoja_practicas(wb, im, ult)
+    assert hoja_practicas(wb, im, ult) == ult_pract, 'desfasaje de filas en Practicas'
+    hoja_simulador(wb, im, ult, ult_pract)
     hoja_prestadores(wb, im, ult)
     hoja_topes(wb, im, ult)
     hoja_maestro_prestadores(wb, im)
     hoja_criterios(wb, total_filas, total_coseg, im)
     wb._sheets = sorted(wb._sheets, key=lambda w: [
-        'Resumen', 'Reglas Coseguro', 'Practicas', 'Prestadores', 'Topes',
+        'Resumen', 'Simulador', 'Practicas', 'Reglas Coseguro', 'Prestadores', 'Topes',
         'Base Imagenes', 'Criterios', 'Maestro Prestadores', 'Maestro Afiliados'
     ].index(w.title))
     for w in wb.worksheets:
